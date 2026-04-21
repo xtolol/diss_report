@@ -1,0 +1,525 @@
+\chapter{Introduction and Background Research}
+
+% You can cite chapters by using '\ref{chapter1}', where the label must
+% match that given in the 'label' command, as on the next line.
+\label{chapter1}
+
+% Sections and sub-sections can be declared using \section and \subsection.
+% There is also a \subsubsection, but consider carefully if you really need
+% so many layers of section structure.
+\section{Introduction}
+Artificial intelligence systems are rapidly moving from research prototypes into fitness tools that monitor activity, training, and rehabilitation, promising personalised exercise feedback at scale without constant human supervision. Recent studies show that smartphone-based, on-device pose estimation can deliver resistance-training programmes with pose classification accuracies around 95\% compared to physiotherapists, while operating in real time on consumer hardware. [1] Such systems can count repetitions, flag poor technique, and adapt difficulty levels, but only if their underlying action recognition models are accurate and efficient enough to run reliably on resource-constrained devices such as phones, tablets, and wearables. This creates a clear need for skeleton-based action recognition methods that combine strong recognition performance with low computational and memory costs.
+
+Skeleton-based human action recognition represents movement using sequences of 2D or 3D joint coordinates rather than full RGB video, which makes it more robust to lighting changes, and background clutter. Because skeletons retain only body geometry and motion, they provide a compact, relatively privacy-preserving modality that has become central to action recognition in fitness, healthcare, surveillance, and human–computer interaction. In this domain, graph convolutional networks have emerged as a leading approach because they naturally model the human body as a graph of joints and connections, and early models such as ST-GCN showed that this formulation could significantly improve recognition accuracy on large benchmarks. [2] Since then, researchers have proposed both more complex and more lightweight graph-based architectures, but most evaluations still focus on broad datasets like NTU RGB+D or Kinetics-Skeleton rather than on exercise-focused settings.
+
+Within this context, the Penn Action dataset offers a concise but challenging testbed: it contains a moderate number of video clips with frame-level 2D joint annotations across a mix of repetitive exercise actions and sports-related movements, making it a natural choice for studying exercise-based recognition from skeletal data. [3] Recent high-capacity skeleton models, such as the UNIK framework, have reported strong Penn Action performance using pretraining and attention-based designs, but these approaches are not explicitly optimised for lightweight deployment and do not focus on the specific behaviour of exercise classes within the dataset. [4]
+
+This project tackles that gap by developing and evaluating a lightweight spatial-temporal graph convolutional network for exercise-based action recognition on Penn Action skeleton sequences. The work first establishes a reproducible ST-GCN baseline and then incrementally introduces three modifications drawn from established literature: skeleton-specific data augmentation, adaptive adjacency matrices, and four-stream input fusion combining joint, bone, and motion information [5][6][7]. The central research question is: Can a lightweight ST-GCN achieve accurate, exercise-focused action recognition while remaining suitable for real-time deployment?
+
+
+% Must provide evidence of a literature review. Use sections
+% and subsections as they make sense for your project.
+\section{Literature review}
+This section traces the evolution of skeleton-based action recognition from early handcrafted descriptors through deep sequential and convolutional models to the graph convolutional formulation that underpins this project. Each stage addressed a specific limitation of its predecessor, and the residual weaknesses of the final model directly motivate the three improvements investigated in this dissertation.
+\subsection{From Handcrafted Features to Graph Convolutional Networks}
+
+The earliest approaches to skeleton-based action recognition relied on handcrafted features computed directly from joint coordinates. Johansson's moving light display experiments in the 1970s first demonstrated that humans can perceive actions from point-light representations of joint motion alone, establishing the theoretical basis for skeleton-based recognition [1]. Building on this insight, researchers in the 2000s and early 2010s designed engineered descriptors such as pairwise joint distances, joint angles, and histograms of oriented displacements to characterise poses and temporal transitions. Vemulapalli et al. proposed modelling skeleton configurations as points on a Lie group manifold, capturing the geometric structure of rotations and translations between body parts, and achieved competitive results on several benchmarks [2]. While these handcrafted methods were interpretable and computationally inexpensive, they required significant domain expertise to design, generalised poorly across datasets with different joint topologies, and could not learn features from data at scale.
+\subsection{Recurrent and Convolutional Approaches}
+The adoption of deep learning shifted the field toward models that could learn feature representations directly from raw joint coordinate sequences. Recurrent neural networks, particularly LSTMs, were among the first deep architectures applied to skeleton data. Du et al. proposed a hierarchical RNN that split the skeleton into five anatomical sub-groups, processed each through independent LSTM streams, and progressively fused their hidden states, achieving strong results on early benchmarks [3]. Shahroudy et al. extended this direction with a part-aware LSTM that learned independent memory cells for different body parts, allowing the network to selectively attend to the limbs most relevant to each action [4]. However, RNN-based methods fundamentally treated skeletons as flat sequences of joint coordinates, which meant they could model temporal dependencies but had no explicit mechanism to encode the spatial relationships defined by the physical skeleton structure. This limited their ability to capture the structured spatial patterns that distinguish many actions.
+Concurrent with recurrent approaches, several groups explored convolutional neural networks for skeleton recognition. Ke et al. transformed skeleton sequences into pseudo-images by arranging joint coordinates into fixed-size matrices and applying standard 2D CNNs [5]. Kim and Reiter similarly encoded temporal joint trajectories as texture-like images and processed them with deep residual networks [6]. These CNN-based methods benefited from well-established image classification architectures and efficient GPU implementations, but the conversion from skeleton to image was inherently lossy: the spatial topology of the human body, specifically which joints are connected by bones, was discarded during the flattening process. As a result, these models had to re-learn spatial relationships from pixel patterns rather than exploiting the known body structure directly.
+
+\subsection{Spatial-Temporal Graph Convolutional Networks}
+The introduction of ST-GCN by Yan et al.\ in 2018 addressed the core limitation shared by both recurrent and convolutional predecessors: none of them explicitly modelled the skeleton as a graph~\cite{yan2018stgcn}. ST-GCN represents the human body as a spatiotemporal graph in which nodes correspond to joints and edges correspond to physical bone connections, with additional temporal edges linking the same joint across consecutive frames. Each ST-GCN block applies two operations in sequence. The spatial graph convolution aggregates features from neighbouring joints according to a fixed adjacency matrix $\mathbf{A}$, updating each joint's representation based on its local skeletal neighbourhood. For a given frame, this is expressed as:
+%
+\begin{equation}
+    \mathbf{f}_{\text{out}} = \sigma\!\left(\mathbf{D}^{-\frac{1}{2}}\,\mathbf{A}\,\mathbf{D}^{-\frac{1}{2}}\,\mathbf{f}_{\text{in}}\,\mathbf{W}_s\right)
+    \label{eq:spatial-conv}
+\end{equation}
+%
+where $\mathbf{A}$ is the adjacency matrix that encodes bone connections between joints, and $\mathbf{D}^{-\frac{1}{2}}\mathbf{A}\,\mathbf{D}^{-\frac{1}{2}}$ being a symmetric normalisation of $\mathbf{A}$ that scales the contribution of each joint by the inverse square root of its degree to prevent high-degree joints from dominating. $\mathbf{f}_{\text{in}}$ is the input feature matrix across all joints, $\mathbf{W}_s$ is a learnable weight matrix, and $\sigma$ is a nonlinearity. The temporal convolution then operates along the time axis with a standard 1D kernel of size~9, capturing how the features of each joint evolve over consecutive frames:
+%
+\begin{equation}
+    \mathbf{f}_{\text{out}} = \sigma\!\left(\mathbf{f}_{\text{in}} * \mathbf{W}_t\right)
+    \label{eq:temporal-conv}
+\end{equation}
+%
+where $\mathbf{W}_t$ is a 1D convolutional kernel applied independently to each joint's temporal feature sequence. After one block, the output is a learned shape feature map $(C_{\text{out}}, T, V)$. for the first block, this transforms the raw 2-channel coordinates into 32 feature channels per joint per frame, where each channel encodes a spatially and temporally informed representation of the role of that joint in the action. Batch normalisation, ReLU activation, and a residual connection complete each block, and multiple blocks are stacked to progressively build higher-level representations. The architecture of a single block is illustrated in Figure~\ref{fig:stgcn-block}. On large-scale benchmarks such as NTU RGB+D and Kinetics-Skeleton, ST-GCN significantly outperformed previous RNN and CNN methods while using a more principled architecture~\cite{yan2018stgcn}.
+
+\begin{figure}[ht]
+    \centering
+    \begin{tikzpicture}[
+    % Block styles
+    convblock/.style={
+        rectangle, draw=black, thick, fill=blue!10,
+        minimum width=1.6cm, minimum height=0.75cm,
+        font=\scriptsize, align=center, rounded corners=2pt
+    },
+    bnblock/.style={
+        rectangle, draw=black, thick, fill=green!10,
+        minimum width=1.1cm, minimum height=0.75cm,
+        font=\scriptsize, align=center, rounded corners=2pt
+    },
+    actblock/.style={
+        rectangle, draw=black, thick, fill=orange!15,
+        minimum width=0.8cm, minimum height=0.75cm,
+        font=\scriptsize, align=center, rounded corners=2pt
+    },
+    addblock/.style={
+        circle, draw=black, thick, fill=yellow!15,
+        minimum size=0.55cm, font=\scriptsize\bfseries, inner sep=0pt
+    },
+    arrow/.style={-{Stealth[length=2mm]}, thick},
+    residual/.style={-{Stealth[length=2mm]}, thick, dashed, draw=black!50},
+    tensor/.style={font=\tiny\ttfamily, text=black!60},
+    joint/.style={circle, fill=red!60, draw=black, thick, minimum size=0.13cm, inner sep=0pt},
+    bone/.style={thick, draw=black!70},
+    ghostjoint/.style={circle, fill=red!30, draw=black!40, minimum size=0.13cm, inner sep=0pt},
+    ghostbone/.style={thick, draw=black!25},
+]
+ 
+% =============================================
+% INPUT: Overlapping skeleton stick figures
+% =============================================
+ 
+% Scale for skeletons
+\def\ss{0.28} % skeleton scale
+\def\sx{0.0}  % skeleton x origin
+ 
+% --- Ghost frame 3 (furthest back) ---
+\def\gx{0.55}
+\def\gy{0.15}
+\coordinate (g3head) at (\sx+\gx, \gy+\ss*3.2);
+\coordinate (g3lsho) at (\sx+\gx-\ss*1.0, \gy+\ss*2.2);
+\coordinate (g3rsho) at (\sx+\gx+\ss*1.0, \gy+\ss*2.2);
+\coordinate (g3lelb) at (\sx+\gx-\ss*1.7, \gy+\ss*1.1);
+\coordinate (g3relb) at (\sx+\gx+\ss*1.7, \gy+\ss*1.1);
+\coordinate (g3lwri) at (\sx+\gx-\ss*2.2, \gy+\ss*0.0);
+\coordinate (g3rwri) at (\sx+\gx+\ss*2.2, \gy+\ss*0.0);
+\coordinate (g3lhip) at (\sx+\gx-\ss*0.6, \gy-\ss*0.3);
+\coordinate (g3rhip) at (\sx+\gx+\ss*0.6, \gy-\ss*0.3);
+\coordinate (g3lkne) at (\sx+\gx-\ss*0.8, \gy-\ss*1.6);
+\coordinate (g3rkne) at (\sx+\gx+\ss*0.8, \gy-\ss*1.6);
+\coordinate (g3lank) at (\sx+\gx-\ss*0.9, \gy-\ss*2.8);
+\coordinate (g3rank) at (\sx+\gx+\ss*0.9, \gy-\ss*2.8);
+\foreach \a/\b in {g3head/g3lsho, g3head/g3rsho, g3lsho/g3lelb, g3rsho/g3relb, g3lelb/g3lwri, g3relb/g3rwri, g3lsho/g3lhip, g3rsho/g3rhip, g3lhip/g3rhip, g3lhip/g3lkne, g3rhip/g3rkne, g3lkne/g3lank, g3rkne/g3rank}{
+    \draw[ghostbone] (\a) -- (\b);
+}
+\foreach \j in {g3head, g3lsho, g3rsho, g3lelb, g3relb, g3lwri, g3rwri, g3lhip, g3rhip, g3lkne, g3rkne, g3lank, g3rank}{
+    \node[ghostjoint] at (\j) {};
+}
+ 
+% --- Ghost frame 2 ---
+\def\gx{0.3}
+\def\gy{0.08}
+\coordinate (g2head) at (\sx+\gx, \gy+\ss*3.2);
+\coordinate (g2lsho) at (\sx+\gx-\ss*1.0, \gy+\ss*2.2);
+\coordinate (g2rsho) at (\sx+\gx+\ss*1.0, \gy+\ss*2.2);
+\coordinate (g2lelb) at (\sx+\gx-\ss*1.7, \gy+\ss*1.1);
+\coordinate (g2relb) at (\sx+\gx+\ss*1.7, \gy+\ss*1.1);
+\coordinate (g2lwri) at (\sx+\gx-\ss*2.2, \gy+\ss*0.0);
+\coordinate (g2rwri) at (\sx+\gx+\ss*2.2, \gy+\ss*0.0);
+\coordinate (g2lhip) at (\sx+\gx-\ss*0.6, \gy-\ss*0.3);
+\coordinate (g2rhip) at (\sx+\gx+\ss*0.6, \gy-\ss*0.3);
+\coordinate (g2lkne) at (\sx+\gx-\ss*0.8, \gy-\ss*1.6);
+\coordinate (g2rkne) at (\sx+\gx+\ss*0.8, \gy-\ss*1.6);
+\coordinate (g2lank) at (\sx+\gx-\ss*0.9, \gy-\ss*2.8);
+\coordinate (g2rank) at (\sx+\gx+\ss*0.9, \gy-\ss*2.8);
+\foreach \a/\b in {g2head/g2lsho, g2head/g2rsho, g2lsho/g2lelb, g2rsho/g2relb, g2lelb/g2lwri, g2relb/g2rwri, g2lsho/g2lhip, g2rsho/g2rhip, g2lhip/g2rhip, g2lhip/g2lkne, g2rhip/g2rkne, g2lkne/g2lank, g2rkne/g2rank}{
+    \draw[ghostbone] (\a) -- (\b);
+}
+\foreach \j in {g2head, g2lsho, g2rsho, g2lelb, g2relb, g2lwri, g2rwri, g2lhip, g2rhip, g2lkne, g2rkne, g2lank, g2rank}{
+    \node[ghostjoint] at (\j) {};
+}
+ 
+% --- Front frame (solid) ---
+\def\gx{0.0}
+\def\gy{0.0}
+\coordinate (fhead) at (\sx+\gx, \gy+\ss*3.2);
+\coordinate (flsho) at (\sx+\gx-\ss*1.0, \gy+\ss*2.2);
+\coordinate (frsho) at (\sx+\gx+\ss*1.0, \gy+\ss*2.2);
+\coordinate (flelb) at (\sx+\gx-\ss*1.7, \gy+\ss*1.1);
+\coordinate (frelb) at (\sx+\gx+\ss*1.7, \gy+\ss*1.1);
+\coordinate (flwri) at (\sx+\gx-\ss*2.2, \gy+\ss*0.0);
+\coordinate (frwri) at (\sx+\gx+\ss*2.2, \gy+\ss*0.0);
+\coordinate (flhip) at (\sx+\gx-\ss*0.6, \gy-\ss*0.3);
+\coordinate (frhip) at (\sx+\gx+\ss*0.6, \gy-\ss*0.3);
+\coordinate (flkne) at (\sx+\gx-\ss*0.8, \gy-\ss*1.6);
+\coordinate (frkne) at (\sx+\gx+\ss*0.8, \gy-\ss*1.6);
+\coordinate (flank) at (\sx+\gx-\ss*0.9, \gy-\ss*2.8);
+\coordinate (frank) at (\sx+\gx+\ss*0.9, \gy-\ss*2.8);
+\foreach \a/\b in {fhead/flsho, fhead/frsho, flsho/flelb, frsho/frelb, flelb/flwri, frelb/frwri, flsho/flhip, frsho/frhip, flhip/frhip, flhip/flkne, frhip/frkne, flkne/flank, frkne/frank}{
+    \draw[bone] (\a) -- (\b);
+}
+\foreach \j in {fhead, flsho, frsho, flelb, frelb, flwri, frwri, flhip, frhip, flkne, frkne, flank, frank}{
+    \node[joint] at (\j) {};
+}
+ 
+% Input label
+\node[tensor, anchor=north] at (0.2, -0.95) {$(2, 100, 13)$};
+\node[font=\scriptsize\bfseries, anchor=south] at (0.2, 1.15) {Input};
+ 
+% =============================================
+% PROCESSING BLOCKS: Left to right
+% =============================================
+ 
+% Spatial Graph Conv
+\node[convblock, right=0.9cm of frelb] (sgc) {Spatial Graph\\Conv ($\mathbf{A}$)};
+ 
+% BN1
+\node[bnblock, right=0.35cm of sgc] (bn1) {BN};
+ 
+% ReLU1
+\node[actblock, right=0.25cm of bn1] (relu1) {ReLU};
+ 
+% Temporal Conv
+\node[convblock, right=0.35cm of relu1] (tc) {Temporal\\Conv ($k{=}9$)};
+ 
+% BN2
+\node[bnblock, right=0.35cm of tc] (bn2) {BN};
+ 
+% Add
+\node[addblock, right=0.4cm of bn2] (add) {$+$};
+ 
+% ReLU2
+\node[actblock, right=0.35cm of add] (relu2) {ReLU};
+ 
+% Output label
+\node[font=\scriptsize\bfseries, right=0.5cm of relu2] (out) {Output};
+\node[tensor, anchor=north] at (out.south) {$(32, 100, 13)$};
+ 
+% =============================================
+% ARROWS
+% =============================================
+ 
+% Input to first block
+\draw[arrow] (0.85, 0.0) -- (sgc.west);
+ 
+% Between blocks
+\draw[arrow] (sgc.east) -- (bn1.west);
+\draw[arrow] (bn1.east) -- (relu1.west);
+\draw[arrow] (relu1.east) -- (tc.west);
+\draw[arrow] (tc.east) -- (bn2.west);
+\draw[arrow] (bn2.east) -- (add.west);
+\draw[arrow] (add.east) -- (relu2.west);
+\draw[arrow] (relu2.east) -- (out.west);
+ 
+% Residual connection (arc over the top)
+\draw[residual] (0.85, 0.0) -- ++(0, 1.5) -| (add.north)
+    node[pos=0.35, above, font=\tiny, text=black!50] {Residual};
+
+\end{tikzpicture}
+\caption{ST-GCN Block for Penn Skeleton Input}
+\label{fig:stgcn-block}
+\end{figure}
+
+\subsection{Limitations of ST-GCN}
+Despite its effectiveness, ST-GCN exhibits two notable limitations that are particularly relevant to exercise-based action recognition. First, the fixed adjacency matrix, defined entirely by the physical skeleton, cannot capture correlations between joints that are not directly connected by bones. For exercise actions this is especially restrictive: jumping jacks involve strong bilateral wrist coupling and push-ups require coordinated wrist–ankle motion, yet none of these pairs share a skeleton edge. Second, ST-GCN operates on a single input representation of raw joint coordinates,  which in turn encodes absolute pose but discards explicit information about limb orientation, velocity, and acceleration. These two architectural limitations, together with the dataset-specific challenges of training on small skeleton datasets, define the three lines of improvement explored in this project.
+
+\subsection{Adaptive Graph Topologies}
+The fixed adjacency matrix used in ST-GCN restricts information flow to physically connected joints, preventing the model from learning correlations between distant but functionally coupled joint pairs~\cite{shi2019two}. For exercise actions this constraint is especially limiting: jumping jacks produce strong bilateral wrist coupling, push-ups require coordinated wrist--ankle motion, and squats involve simultaneous hip--shoulder alignment, yet none of these pairs share a direct skeleton edge. A learnable graph topology that can discover such implicit dependencies from training data is therefore a natural next step for improving exercise recognition.
+
+Shi et al.\ proposed the Two-Stream Adaptive Graph Convolutional Network (2S-AGCN), which replaces the fixed adjacency with a three-component decomposition applied in every graph convolutional layer~\cite{shi2019two}. The modified adjacency is defined as:
+%
+\begin{equation}
+    \hat{\mathbf{A}} \;=\; \mathbf{A} + \mathbf{B} + \mathbf{C}
+    \label{eq:adaptive-adj}
+\end{equation}
+%
+where $\mathbf{A}$ is the original normalised skeleton adjacency matrix, frozen during training to preserve the known physical topology. $\mathbf{B}$ is a globally learnable parameter matrix of shape $V \times V$ (here $13 \times 13$), initialised to zero, that allows the network to discover class-invariant implicit joint dependencies shared across all samples. $\mathbf{C}$ is a data-dependent attention matrix computed per sample via a normalised embedded dot product: two $1 \times 1$ convolution branches ($\theta$ and $\phi$) project the input feature map into a lower-dimensional embedding space, and their dot product is row-wise softmax-normalised to yield $\mathbf{C}$. This component captures instance-level co-activation patterns, enabling the graph to adapt its connectivity to the specific motion observed in each input sequence. On NTU RGB+D and Kinetics-Skeleton, 2S-AGCN improved upon the ST-GCN baseline by approximately 2--4\% across evaluation protocols, demonstrating that learnable topology provides a consistent benefit on large-scale benchmarks~\cite{shi2019two}. This three-component formulation is adopted in this project.
+
+Subsequent work has extended adaptive graph learning further. Chen et al.\ introduced the Channel-wise Topology Refinement Graph Convolutional Network (CTR-GCN), which learns a distinct topology per feature channel rather than sharing a single adjacency across all channels~\cite{chen2021ctr}. Cheng et al.\ proposed a decoupling strategy in DC-GCN that separates spatial and temporal graph convolutions into independently learnable components~\cite{cheng2020dcgcn}. Both approaches achieve additional gains on large datasets but introduce substantially more parameters and implementation complexity. They are noted here as context for the design space but are not implemented in this project, which prioritises a minimal, well-understood adaptive formulation suitable for a small dataset.
+
+\subsection{Multi-Stream Input Representations}
+ST-GCN and its adaptive variants operate on a single input stream of raw joint coordinates, which encodes absolute spatial pose but does not explicitly represent limb structure or temporal dynamics. Alongside the adaptive adjacency formulation described above, Shi et al.\ introduced a second input stream in 2S-AGCN: the \emph{bone stream}~\cite{shi2019two}. For each bone edge connecting source joint $i$ to target joint $j$, the bone vector is computed as:
+%
+\begin{equation}
+    \mathbf{b}_{ij,t} \;=\; \mathbf{v}_{j,t} - \mathbf{v}_{i,t}
+    \label{eq:bone-stream}
+\end{equation}
+%
+where $\mathbf{v}_{j,t}$ and $\mathbf{v}_{i,t}$ are the coordinate vectors of joints $j$ and $i$ at frame $t$. This encodes each limb's orientation and length independently of the subject's absolute position in the frame. A second, architecturally identical model is trained on the bone stream, and the two models' softmax outputs are averaged at inference. On NTU RGB+D, this two-stream fusion improved over the single joint stream by approximately 1--2\%~\cite{shi2019two}.
+
+Shi et al.\ subsequently extended this idea in the Multi-Stream Adaptive Graph Convolutional Network (MS-AAGCN) by adding two temporal-difference modalities~\cite{shi2020skeleton}. The \emph{joint-motion stream} computes the frame-wise velocity of each joint:
+%
+\begin{equation}
+    \mathbf{m}^{J}_{i,t} \;=\; \mathbf{v}_{i,t+1} - \mathbf{v}_{i,t}
+    \label{eq:joint-motion}
+\end{equation}
+%
+and the \emph{bone-motion stream} computes the frame-wise acceleration of each bone:
+%
+\begin{equation}
+    \mathbf{m}^{B}_{ij,t} \;=\; \mathbf{b}_{ij,t+1} - \mathbf{b}_{ij,t}
+    \label{eq:bone-motion}
+\end{equation}
+%
+Both are zero-padded at the sequence boundary. Each of the four streams produces an input tensor of the same shape as the original joint input, allowing all four to be processed by architecturally identical but independently trained models. At inference, MS-AAGCN fuses the four softmax outputs via a weighted score-level average. Shi et al.\ reported that this four-stream fusion consistently adds 3--5\% test accuracy over a single joint stream across NTU RGB+D and Kinetics-Skeleton benchmarks~\cite{shi2020skeleton}. The additional streams provide complementary information that is particularly relevant for exercise recognition: bone vectors capture whether limbs are extended or flexed regardless of the subject's global position, while motion streams distinguish actions with similar static poses but different movement patterns, such as the upward and downward phases of a squat. This four-stream fusion strategy is adopted in this project following the MS-AAGCN formulation, with stream weights taken directly from the original work. The four modalities are illustrated in Figure~\ref{fig:four-streams}.
+
+% ── Helper commands for skeleton drawing ──
+\newcommand{\defineFrameT}[2]{% #1=prefix, #2=origin coordinate name
+    \coordinate (#1head) at ($(#2)+(0,{\s*3.2})$);
+    \coordinate (#1lsho) at ($(#2)+({-\s*1.0},{\s*2.2})$);
+    \coordinate (#1rsho) at ($(#2)+({\s*1.0},{\s*2.2})$);
+    \coordinate (#1lelb) at ($(#2)+({-\s*1.7},{\s*1.1})$);
+    \coordinate (#1relb) at ($(#2)+({\s*1.7},{\s*1.1})$);
+    \coordinate (#1lwri) at ($(#2)+({-\s*2.2},0)$);
+    \coordinate (#1rwri) at ($(#2)+({\s*2.2},0)$);
+    \coordinate (#1lhip) at ($(#2)+({-\s*0.6},{-\s*0.3})$);
+    \coordinate (#1rhip) at ($(#2)+({\s*0.6},{-\s*0.3})$);
+    \coordinate (#1lkne) at ($(#2)+({-\s*0.8},{-\s*1.6})$);
+    \coordinate (#1rkne) at ($(#2)+({\s*0.8},{-\s*1.6})$);
+    \coordinate (#1lank) at ($(#2)+({-\s*0.9},{-\s*2.8})$);
+    \coordinate (#1rank) at ($(#2)+({\s*0.9},{-\s*2.8})$);
+}
+\newcommand{\defineFrameTp}[2]{% #1=prefix, #2=origin coordinate name (frame t+1, pose shifted)
+    \coordinate (#1head) at ($(#2)+({\s*0.1},{\s*3.3})$);
+    \coordinate (#1lsho) at ($(#2)+({-\s*0.9},{\s*2.3})$);
+    \coordinate (#1rsho) at ($(#2)+({\s*1.1},{\s*2.3})$);
+    \coordinate (#1lelb) at ($(#2)+({-\s*1.6},{\s*1.2})$);
+    \coordinate (#1relb) at ($(#2)+({\s*1.5},{\s*1.5})$);
+    \coordinate (#1lwri) at ($(#2)+({-\s*2.1},{\s*0.1})$);
+    \coordinate (#1rwri) at ($(#2)+({\s*1.8},{\s*0.7})$);
+    \coordinate (#1lhip) at ($(#2)+({-\s*0.5},{-\s*0.2})$);
+    \coordinate (#1rhip) at ($(#2)+({\s*0.7},{-\s*0.2})$);
+    \coordinate (#1lkne) at ($(#2)+({-\s*0.7},{-\s*1.5})$);
+    \coordinate (#1rkne) at ($(#2)+({\s*0.9},{-\s*1.5})$);
+    \coordinate (#1lank) at ($(#2)+({-\s*0.8},{-\s*2.7})$);
+    \coordinate (#1rank) at ($(#2)+({\s*1.0},{-\s*2.7})$);
+}
+\newcommand{\drawBones}[2]{% #1=prefix, #2=draw style
+    \foreach \a/\b in {head/lsho, head/rsho, lsho/lelb, rsho/relb, lelb/lwri, relb/rwri,
+                       lsho/lhip, rsho/rhip, lhip/rhip, lhip/lkne, rhip/rkne, lkne/lank, rkne/rank}{
+        \draw[#2] (#1\a) -- (#1\b);
+    }
+}
+\newcommand{\drawJoints}[2]{% #1=prefix, #2=node style
+    \foreach \j in {head, lsho, rsho, lelb, relb, lwri, rwri, lhip, rhip, lkne, rkne, lank, rank}{
+        \node[#2] at (#1\j) {};
+    }
+}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}[
+    % Joint styles
+    jt/.style={circle, fill=red!70, draw=black!80, thick,
+               minimum size=4pt, inner sep=0pt},
+    jtghost/.style={circle, fill=black!20, draw=black!40,
+                    minimum size=2.5pt, inner sep=0pt},
+    % Bone styles
+    bn/.style={semithick, draw=black!50},
+    bnghost/.style={thin, draw=black!25},
+    bndir/.style={-{Stealth[length=1.5mm]}, semithick, draw=blue!65},
+    % Motion arrow styles
+    jmot/.style={-{Stealth[length=1.8mm]}, semithick, draw=green!55!black},
+    bmot/.style={-{Stealth[length=1.8mm]}, semithick, draw=orange!70!black},
+    % Label styles
+    plabel/.style={font=\small\bfseries},
+    flabel/.style={font=\tiny, text=black!50},
+    eqlabel/.style={font=\scriptsize, text=black!70},
+]
+
+\def\s{0.30}
+
+% ============================================================
+%  PANEL (a): JOINT STREAM
+% ============================================================
+\begin{scope}[shift={(0,0)}]
+    \node[plabel] at (0, \s*3.5+0.45) {(a) Joint};
+
+    % Frame t
+    \coordinate (aO) at (-1.1, 0);
+    \defineFrameT{at-}{aO}
+    \drawBones{at-}{bn}
+    \drawJoints{at-}{jt}
+    \node[flabel] at (-1.1, -\s*2.8-0.3) {$t$};
+
+    % Frame t+1
+    \coordinate (aO1) at (1.1, 0);
+    \defineFrameTp{atp-}{aO1}
+    \drawBones{atp-}{bn}
+    \drawJoints{atp-}{jt}
+    \node[flabel] at (1.1, -\s*2.8-0.3) {$t{+}1$};
+
+    % Annotation: label a representative joint
+    \draw[-{Stealth[length=1.2mm]}, thin, black!60]
+        ($(at-rwri)+(0.15,-0.25)$) -- (at-rwri);
+    \node[font=\tiny, text=black!60, anchor=north] at ($(at-rwri)+(0.15,-0.25)$)
+        {$\mathbf{v}_{i,t}$};
+
+    % Equation
+    \node[eqlabel] at (0, -\s*2.8-0.7) {$\mathbf{v}_{i,t}$};
+\end{scope}
+
+% ============================================================
+%  PANEL (b): BONE STREAM
+% ============================================================
+\begin{scope}[shift={(7,0)}]
+    \node[plabel] at (0, \s*3.5+0.45) {(b) Bone};
+
+    % Frame t — directed bone arrows, small joints
+    \coordinate (bO) at (-1.1, 0);
+    \defineFrameT{bt-}{bO}
+    \foreach \a/\b in {head/lsho, head/rsho, lsho/lelb, rsho/relb, lelb/lwri, relb/rwri,
+                       lsho/lhip, rsho/rhip, lhip/rhip, lhip/lkne, rhip/rkne, lkne/lank, rkne/rank}{
+        \draw[bndir] (bt-\a) -- (bt-\b);
+    }
+    \drawJoints{bt-}{jtghost}
+    \node[flabel] at (-1.1, -\s*2.8-0.3) {$t$};
+
+    % Frame t+1 — directed bone arrows, small joints
+    \coordinate (bO1) at (1.1, 0);
+    \defineFrameTp{btp-}{bO1}
+    \foreach \a/\b in {head/lsho, head/rsho, lsho/lelb, rsho/relb, lelb/lwri, relb/rwri,
+                       lsho/lhip, rsho/rhip, lhip/rhip, lhip/lkne, rhip/rkne, lkne/lank, rkne/rank}{
+        \draw[bndir] (btp-\a) -- (btp-\b);
+    }
+    \drawJoints{btp-}{jtghost}
+    \node[flabel] at (1.1, -\s*2.8-0.3) {$t{+}1$};
+
+    % Annotation: label a representative bone
+    \node[font=\tiny, text=blue!65, anchor=west] at ($(bt-relb)!0.5!(bt-rwri)+(0.12,0)$)
+        {$\mathbf{b}_{ij,t}$};
+
+    % Equation
+    \node[eqlabel] at (0, -\s*2.8-0.7)
+        {$\mathbf{b}_{ij,t} = \mathbf{v}_{j,t} - \mathbf{v}_{i,t}$};
+\end{scope}
+
+% ============================================================
+%  PANEL (c): JOINT-MOTION STREAM
+% ============================================================
+\begin{scope}[shift={(0,-4.2)}]
+    \node[plabel] at (0, \s*3.5+0.45) {(c) Joint-Motion};
+
+    % Frame t (ghost)
+    \coordinate (cO) at (-1.1, 0);
+    \defineFrameT{ct-}{cO}
+    \drawBones{ct-}{bnghost}
+    \drawJoints{ct-}{jtghost}
+    \node[flabel] at (-1.1, -\s*2.8-0.3) {$t$};
+
+    % Frame t+1 (ghost)
+    \coordinate (cO1) at (1.1, 0);
+    \defineFrameTp{ctp-}{cO1}
+    \drawBones{ctp-}{bnghost}
+    \drawJoints{ctp-}{jtghost}
+    \node[flabel] at (1.1, -\s*2.8-0.3) {$t{+}1$};
+
+    % Joint-motion arrows (selected joints for clarity)
+    \foreach \j in {head, rsho, relb, rwri, lsho, lelb, lwri, rhip, rkne, rank}{
+        \draw[jmot] (ct-\j) -- (ctp-\j);
+    }
+
+    % Equation
+    \node[eqlabel] at (0, -\s*2.8-0.7)
+        {$\mathbf{m}^{J}_{i,t} = \mathbf{v}_{i,t{+}1} - \mathbf{v}_{i,t}$};
+\end{scope}
+
+% ============================================================
+%  PANEL (d): BONE-MOTION STREAM
+% ============================================================
+\begin{scope}[shift={(7,-4.2)}]
+    \node[plabel] at (0, \s*3.5+0.45) {(d) Bone-Motion};
+
+    % Frame t (ghost)
+    \coordinate (dO) at (-1.1, 0);
+    \defineFrameT{dt-}{dO}
+    \drawBones{dt-}{bnghost}
+    \drawJoints{dt-}{jtghost}
+    \node[flabel] at (-1.1, -\s*2.8-0.3) {$t$};
+
+    % Frame t+1 (ghost)
+    \coordinate (dO1) at (1.1, 0);
+    \defineFrameTp{dtp-}{dO1}
+    \drawBones{dtp-}{bnghost}
+    \drawJoints{dtp-}{jtghost}
+    \node[flabel] at (1.1, -\s*2.8-0.3) {$t{+}1$};
+
+    % Bone-motion arrows at bone midpoints (selected bones)
+    \foreach \a/\b in {rsho/relb, relb/rwri, lsho/lelb, lelb/lwri, rhip/rkne, rkne/rank}{
+        \draw[bmot] ($(dt-\a)!0.5!(dt-\b)$) -- ($(dtp-\a)!0.5!(dtp-\b)$);
+    }
+
+    % Equation
+    \node[eqlabel] at (0, -\s*2.8-0.7)
+        {$\mathbf{m}^{B}_{ij,t} = \mathbf{b}_{ij,t{+}1} - \mathbf{b}_{ij,t}$};
+\end{scope}
+
+\end{tikzpicture}
+\caption{Four-stream input modalities illustrated on two consecutive Penn Action skeleton frames ($t$ and $t{+}1$). (a)~Joint positions $\mathbf{v}_{i,t}$, (b)~directed bone vectors $\mathbf{b}_{ij,t}$, (c)~joint-motion velocity vectors between frames, (d)~bone-motion acceleration vectors between frames.}
+\label{fig:four-streams}
+\end{figure}
+
+\subsection{The Penn Action Dataset}
+The Penn Action dataset, introduced by Zhang et al., contains 2,326 video clips with frame-level ground-truth 2D joint annotations for 13 body keypoints across 15 action classes~\cite{zhang2013actemes}. Eight of these classes represent repetitive exercise movements: push-ups, squats, sit-ups, pull-ups, jumping jacks, bench press, clean and jerk, and straddle chop. The remaining five are sports-related actions: baseball pitch, baseball swing, golf swing, tennis forehand, and tennis serve. Each clip provides per-frame $(x, y)$ coordinates for all 13 joints along with a visibility flag, making the dataset one of the few publicly available benchmarks that combines dense 2D skeleton annotations with a substantial proportion of exercise-specific classes. The dataset supplies an official train/test split; in this project the official training partition is further divided into stratified 80/20 training and validation subsets, while the test set is reserved for final evaluation only.
+
+Penn Action has seen adoption across the skeleton-based recognition literature as a compact, exercise-rich evaluation benchmark. The original 2S-AGCN evaluation included Penn Action alongside larger datasets, demonstrating that adaptive adjacency matrices generalise to smaller skeleton corpora~\cite{shi2019two}. More recently, the UNIK framework achieved 97.2\% accuracy on Penn Action by combining a multi-head attention graph model with large-scale pretraining on Kinetics-400~\cite{yang2021unik}. These results confirm that Penn Action is a meaningful testbed: it is small enough for rapid experimentation yet challenging enough that model design choices produce measurable accuracy differences.
+
+However, the dataset exhibits three characteristics that make it particularly challenging for lightweight models trained from scratch. First, the dataset is small: approximately 1,550 training samples across 13 classes yields roughly 120 samples per class, which is one to two orders of magnitude fewer than NTU RGB+D. This severely limits the diversity of poses and body types the model observes during training, increasing the risk of overfitting. Second, the annotations are 2D only, providing no depth information; actions that differ primarily in the sagittal plane, such as push-ups and bench press, can therefore produce nearly identical skeleton projections. Third, exercise classes exhibit high intra-class variation in execution speed: the same squat action may be performed at markedly different cadences across subjects, creating temporal variability that a fixed-length input representation must absorb. Together, these limitations motivate targeted data augmentation as the first improvement applied to the baseline model.
+
+\subsection{Data Augmentation for Small Skeleton Datasets}
+Data augmentation is a widely adopted regularisation strategy for reducing overfitting in deep learning when training data are limited~\cite{shorten2019survey}. By applying label-preserving transformations to existing samples at training time, augmentation artificially increases the effective size and diversity of the dataset, encouraging the model to learn invariances rather than memorise individual examples. For skeleton-based action recognition, augmentation operates directly on joint coordinate sequences and can be broadly divided into spatial transformations, which perturb the geometry of individual frames, and temporal transformations, which modify the speed or duration of the sequence.
+
+Xin et al.\ conducted a comprehensive study of both spatial and temporal augmentation strategies for skeleton-based recognition across multiple deep learning architectures~\cite{xin2024enhancing}. Their spatial augmentations included rotation of skeleton sequences around the vertical axis at varying angles, while their temporal augmentations varied the playback speed of action sequences to generate faster and slower variants of each sample. A key finding was that temporal augmentation had a more pronounced and consistent impact on model accuracy than spatial augmentation alone, particularly for actions with high intra-class variation in execution speed. This result is directly relevant to the Penn Action exercise classes, where cadence variation between subjects is the dominant source of intra-class variability.
+
+Drawing on these findings, this project applies four augmentation techniques to the baseline ST-GCN, evenly split between spatial and temporal domains. The two spatial augmentations are as follows. \emph{Random noise} adds Gaussian jitter independently to each joint coordinate:
+%
+\begin{equation}
+    \tilde{\mathbf{v}}_{i,t} \;=\; \mathbf{v}_{i,t} + \boldsymbol{\epsilon}, \quad \boldsymbol{\epsilon} \sim \mathcal{N}\!\left(\mathbf{0},\, \sigma^{2}\mathbf{I}\right)
+    \label{eq:aug-noise}
+\end{equation}
+%
+where $\sigma$ controls the perturbation magnitude. This encourages the model to tolerate minor positional uncertainty in joint estimates. \emph{Random rotation} applies a 2D rotation of angle $\theta$ around the skeleton centroid to all joints simultaneously:
+%
+\begin{equation}
+    \tilde{\mathbf{v}}_{i,t} \;=\; \mathbf{R}(\theta)\,\mathbf{v}_{i,t}, \quad
+    \mathbf{R}(\theta) = \begin{pmatrix} \cos\theta & -\sin\theta \\ \sin\theta & \cos\theta \end{pmatrix}, \quad
+    \theta \sim \mathrm{Uniform}(-\theta_{\max},\, \theta_{\max})
+    \label{eq:aug-rotation}
+\end{equation}
+%
+which teaches the model to generalise across slight viewpoint variations in the 2D projection.
+
+The two temporal augmentations target sequence-level variability. \emph{Time interpolation} selects a contiguous sub-window of random length $L$ and resamples it to the fixed sequence length $T$ via linear interpolation:
+%
+\begin{equation}
+    L \sim \mathrm{Uniform}(\alpha T,\, T), \qquad
+    \tilde{\mathbf{v}}_{i,t'} = \mathrm{Interp}\!\left(\mathbf{v}_{i,\,t_{\text{start}}:t_{\text{start}}+L},\; T\right)
+    \label{eq:aug-crop}
+\end{equation}
+%
+where $\alpha \in (0,1]$ controls the minimum crop ratio. This simulates partial observations and forces the model to recognise actions from incomplete temporal context. \emph{Time warping} resamples the entire sequence at a randomly drawn speed factor $r$ and resizes the result back to $T$ frames:
+%
+\begin{equation}
+    r \sim \mathrm{Uniform}(r_{\min},\, r_{\max}), \qquad
+    \tilde{\mathbf{v}}_{i,t'} = \mathrm{Interp}\!\left(\mathbf{v}_{i,\,1:T},\; \lfloor T/r \rfloor \right) \xrightarrow{\text{resize}} T
+    \label{eq:aug-warp}
+\end{equation}
+%
+Speed perturbation is the most domain-motivated of the four augmentations: exercise classes in Penn Action exhibit substantial cadence variation between subjects, and exposing the model to artificially faster and slower executions directly addresses this source of intra-class variance. All four augmentations are composed as a stochastic transform applied per sample during training; validation and test data remain unaugmented.
+
+\subsection{Research Gap and Project Objectives}
+
+\subsubsection*{Synthesis of Existing Work}
+The literature reviewed above establishes a clear trajectory: skeleton-based action recognition has progressed from handcrafted descriptors through recurrent and convolutional models to graph convolutional networks, with ST-GCN providing the foundational architecture that this project extends. Subsequent work has proposed three complementary improvements to ST-GCN, each well-supported by experimental evidence on large-scale benchmarks:
+
+\begin{itemize}
+    \item \textbf{Adaptive graph topology} (2S-AGCN~\cite{shi2019two}): Learnable adjacency decomposition $\hat{\mathbf{A}} = \mathbf{A} + \mathbf{B} + \mathbf{C}$ captures joint correlations beyond fixed skeleton edges, yielding consistent gains on NTU RGB+D and Kinetics-Skeleton.
+    \item \textbf{Multi-stream input fusion} (MS-AAGCN~\cite{shi2020skeleton}): Training independent models on joint, bone, joint-motion, and bone-motion streams and fusing their predictions adds 3--5\% accuracy over a single stream across multiple benchmarks.
+    \item \textbf{Data augmentation} (Xin et al.~\cite{xin2024enhancing}): Spatial and temporal perturbations, particularly speed-based augmentation, are effective at reducing overfitting on smaller skeleton datasets.
+\end{itemize}
+
+Despite this progress, three gaps remain unaddressed in the literature. First, all three improvements have been evaluated in isolation or on large datasets, but their combined, incremental effect on a small, exercise-focused benchmark such as Penn Action has not been systematically measured. Second, no published work specifically targets lightweight ST-GCN architectures for exercise-based action recognition, where per-class discrimination between structurally similar movements (e.g.\ push-ups vs.\ bench press) is the central challenge. Third, models achieving high accuracy on Penn Action, such as UNIK at 97.2\%~\cite{yang2021unik}, rely on large-scale pretraining and attention-heavy architectures that are not suited to resource-constrained deployment.
+
+\subsubsection*{Aim}
+This project aims to develop and evaluate a lightweight ST-GCN for exercise-based action recognition on Penn Action skeletal data, systematically applying three targeted improvements and analysing their cumulative effect on both overall accuracy and per-class discrimination across exercise and non-exercise classes.
+
+\subsubsection*{Objectives}
+\begin{itemize}
+    \item \textbf{O1.} Implement and evaluate a reproducible lightweight 6-block ST-GCN baseline on the Penn Action dataset, establishing a fixed reference point for all subsequent comparisons.
+    \item \textbf{O2.} Apply skeleton-specific data augmentation — random noise, random rotation, time interpolation, and time warping — and measure its effect on test accuracy and the train/validation accuracy gap.
+    \item \textbf{O3.} Integrate adaptive adjacency matrices following the 2S-AGCN decomposition and evaluate whether learnable graph topology improves performance on Penn Action's small training set.
+    \item \textbf{O4.} Implement four-stream input fusion across joint, bone, joint-motion, and bone-motion modalities following the MS-AAGCN strategy and measure the accuracy gain over the single-stream adaptive model.
+    \item \textbf{O5.} Analyse per-class test accuracy for exercise and non-exercise classes across baseline and full model conditions, identifying which improvements disproportionately benefit exercise-specific recognition.
+\end{itemize}

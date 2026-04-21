@@ -1,0 +1,296 @@
+\chapter{Methodology}
+\label{chapter2}
+
+This chapter presents the design decisions, architectural rationale, and evaluation framework that underpin the experimental work. Section~\ref{sec:formulation} defines the recognition task formally. Section~\ref{sec:baseline-design} motivates the choice of baseline architecture. Sections~\ref{sec:aug-rationale}--\ref{sec:fusion-rationale} justify each of the three incremental improvements. Section~\ref{sec:ablation-design} specifies the ablation study design used to compare configurations. Section~\ref{sec:testing-strategy} centralises all testing methodology decisions. Sections~\ref{sec:project-mgmt} and~\ref{sec:version-control} describe the project management and version control strategies. Implementation details --- the concrete \emph{how} of each decision --- are deferred to Chapter~3; results are presented and discussed in Chapter~4.
+
+% ─────────────────────────────────────────────────────────────
+\section{Problem Formulation}
+\label{sec:formulation}
+% ─────────────────────────────────────────────────────────────
+
+The task is posed as a sequence classification problem on skeletal data. Given a fixed-length sequence of 2D joint coordinates with shape $(T,\,13,\,2)$, where $T$ is the sequence length, 13 is the number of joints in the Penn Action skeleton~\cite{zhang2013actemes}, and 2 corresponds to the $(x,\,y)$ coordinate pair per joint per frame, the model must predict a single action class label from the 15 Penn Action classes. The input is produced by the preprocessing pipeline described in Section~3.1; the output is a single index from the Penn Action label set.
+
+The evaluation objective is to maximise top-1 test accuracy on the held-out Penn Action test set, subject to a lightweight parameter budget consistent with the 6-block channel progression described in Section~\ref{sec:baseline-design}. The evaluation metrics and testing protocol are defined in Section~\ref{sec:testing-strategy}.
+
+% ─────────────────────────────────────────────────────────────
+\section{Baseline Architecture Design}
+\label{sec:baseline-design}
+% ─────────────────────────────────────────────────────────────
+
+A 6-block Spatial-Temporal Graph Convolutional Network (ST-GCN) is selected as the baseline model. The choice is motivated by three properties that are essential for a clean ablation study: the architecture is directly traceable to a well-documented reference implementation, its block structure exposes a single, clearly identified component for each subsequent modification, and its parameter count is deliberately lightweight, making it representative of the resource-constrained deployment scenario targeted by this project. 
+
+The network consists of six ST-GCN blocks with output channel widths of 32, 32, 64, 64, 128, and 128 respectively. Each block applies a spatial graph convolution over the joint graph, followed by a temporal convolution with kernel size 9, batch normalisation, ReLU activation, and a residual connection --- as described in Section~1.2.1 and illustrated in Figure~\ref{fig:stgcn-block}. The channel progression is deliberately conservative: heavier widths would increase expressive capacity but would also amplify overfitting risk on Penn Action's small training partition of approximately 1,545 clips. The input tensor has shape $(N,\,2,\,100,\,13)$, where $N$ is the batch size, 2 corresponds to the $(x,\,y)$ coordinates, 100 is the fixed sequence length (see Section~3.1), and 13 is the joint count. Temporal downsampling by a factor of 2 is applied at blocks 3 and 5 via stride-2 temporal convolution, reducing the temporal resolution from 100 to 50 to 25 frames across the network depth.
+
+The spatial graph convolution in each block operates on a fixed, normalised adjacency matrix constructed from Penn Action's 13-joint skeleton. Adopting this fixed strategy as the baseline makes any subsequent accuracy change attributable to the change in graph connectivity rather than to any other architectural modification.
+
+Following the final ST-GCN block, a Global Average Pooling (GAP) layer collapses the temporal and spatial dimensions into a 128-dimensional feature vector without introducing additional learnable parameters. Batch normalisation and Dropout($p = 0.2$) are applied before a two-layer classification head consisting of a fully connected layer FC(128) followed by FC(15) with a softmax output over the 15 action classes. The conservative dropout rate of 0.2 is appropriate for a small dataset: more aggressive regularisation through dropout degrades convergence when training samples are scarce. The full baseline architecture, including channel widths, temporal resolutions, and the classification head, is illustrated in Figure~\ref{fig:baseline-arch}.
+
+The network is trained with cross-entropy loss using the Adam optimiser, with hyperparameters selected via a Grid Search over typical configurations (see Section 4.3).
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  node distance=0.5cm,
+  % --- Mandatory style definitions (do NOT modify) ---
+  convblock/.style={rectangle, draw=black, thick, fill=blue!10,
+    minimum width=1.6cm, minimum height=0.75cm,
+    font=\scriptsize, align=center, rounded corners=2pt},
+  bnblock/.style={rectangle, draw=black, thick, fill=green!10,
+    minimum width=1.1cm, minimum height=0.75cm,
+    font=\scriptsize, align=center, rounded corners=2pt},
+  actblock/.style={rectangle, draw=black, thick, fill=orange!15,
+    minimum width=0.8cm, minimum height=0.75cm,
+    font=\scriptsize, align=center, rounded corners=2pt},
+  addblock/.style={circle, draw=black, thick, fill=yellow!15,
+    minimum size=0.55cm, font=\scriptsize\bfseries, inner sep=0pt},
+  arrow/.style={-{Stealth[length=2mm]}, thick},
+  residual/.style={-{Stealth[length=2mm]}, thick, dashed, draw=black!50},
+  tensor/.style={font=\tiny\ttfamily, text=black!60},
+  joint/.style={circle, fill=red!60, draw=black, thick,
+    minimum size=0.13cm, inner sep=0pt},
+  bone/.style={thick, draw=black!70},
+  ghostjoint/.style={circle, fill=red!30, draw=black!40,
+    minimum size=0.13cm, inner sep=0pt},
+  ghostbone/.style={thick, draw=black!25},
+  % --- Additional styles for this figure ---
+  stblock/.style={rectangle, draw=blue!70, very thick, fill=blue!6,
+    minimum width=2.0cm, minimum height=3.8cm,
+    align=center, rounded corners=4pt, inner sep=5pt},
+  clsbox/.style={rectangle, draw=black!70, thick,
+    minimum width=1.2cm, minimum height=0.7cm,
+    font=\scriptsize, align=center, rounded corners=2pt},
+]
+
+%% ---- Input annotation ----
+\node[tensor, align=center] (inp) {$\mathbf{x}$\\[2pt]$(N,2,100,13)$};
+
+%% ---- Six ST-GCN blocks ----
+\node[stblock, right=0.9cm of inp] (b1) {
+  \textbf{\small Block 1}\\[4pt]
+  \scriptsize GCN\\[2pt]
+  \scriptsize TCN\\[2pt]
+  \scriptsize BN\\[2pt]
+  \scriptsize ReLU\\[4pt]
+  \tiny $C_{out}\!=\!32$\\[1pt]
+  \tiny $T\!=\!100$
+};
+
+\node[stblock, right=0.55cm of b1] (b2) {
+  \textbf{\small Block 2}\\[4pt]
+  \scriptsize GCN\\[2pt]
+  \scriptsize TCN\\[2pt]
+  \scriptsize BN\\[2pt]
+  \scriptsize ReLU\\[4pt]
+  \tiny $C_{out}\!=\!32$\\[1pt]
+  \tiny $T\!=\!100$
+};
+
+\node[stblock, right=0.55cm of b2] (b3) {
+  \textbf{\small Block 3}\\[4pt]
+  \scriptsize GCN\\[2pt]
+  \scriptsize TCN\\[2pt]
+  \scriptsize BN\\[2pt]
+  \scriptsize ReLU\\[4pt]
+  \tiny $C_{out}\!=\!64$\\[1pt]
+  \tiny $T\!=\!50\;${\color{red!70}\tiny$\downarrow$2}
+};
+
+\node[stblock, right=0.55cm of b3] (b4) {
+  \textbf{\small Block 4}\\[4pt]
+  \scriptsize GCN\\[2pt]
+  \scriptsize TCN\\[2pt]
+  \scriptsize BN\\[2pt]
+  \scriptsize ReLU\\[4pt]
+  \tiny $C_{out}\!=\!64$\\[1pt]
+  \tiny $T\!=\!50$
+};
+
+\node[stblock, right=0.55cm of b4] (b5) {
+  \textbf{\small Block 5}\\[4pt]
+  \scriptsize GCN\\[2pt]
+  \scriptsize TCN\\[2pt]
+  \scriptsize BN\\[2pt]
+  \scriptsize ReLU\\[4pt]
+  \tiny $C_{out}\!=\!128$\\[1pt]
+  \tiny $T\!=\!25\;${\color{red!70}\tiny$\downarrow$2}
+};
+
+\node[stblock, right=0.55cm of b5] (b6) {
+  \textbf{\small Block 6}\\[4pt]
+  \scriptsize GCN\\[2pt]
+  \scriptsize TCN\\[2pt]
+  \scriptsize BN\\[2pt]
+  \scriptsize ReLU\\[4pt]
+  \tiny $C_{out}\!=\!128$\\[1pt]
+  \tiny $T\!=\!25$
+};
+
+%% ---- Classification head ----
+\node[clsbox, fill=gray!15,   right=0.9cm of b6]  (gap)  {GAP};
+\node[clsbox, fill=green!10,  right=0.4cm of gap]  (bn)   {BN};
+\node[clsbox, fill=orange!15, right=0.4cm of bn]   (drop) {Drop\\$p{=}0.2$};
+\node[clsbox, fill=blue!10,   right=0.4cm of drop] (fc1)  {FC\\128};
+\node[clsbox, fill=blue!10,   right=0.4cm of fc1]  (fc2)  {FC\\15};
+\node[below=0.08cm of fc2, font=\tiny, text=black!55] {softmax};
+
+%% ---- Output annotation ----
+\node[tensor, right=0.6cm of fc2, align=center] (out) {$\hat{y}$\\[2pt]$(N,15)$};
+
+%% ---- Main flow arrows ----
+\draw[arrow] (inp)  -- (b1);
+\draw[arrow] (b1)   -- (b2);
+\draw[arrow] (b2)   -- (b3);
+\draw[arrow] (b3)   -- (b4);
+\draw[arrow] (b4)   -- (b5);
+\draw[arrow] (b5)   -- (b6);
+\draw[arrow] (b6)   -- (gap);
+\draw[arrow] (gap)  -- (bn);
+\draw[arrow] (bn)   -- (drop);
+\draw[arrow] (drop) -- (fc1);
+\draw[arrow] (fc1)  -- (fc2);
+\draw[arrow] (fc2)  -- (out);
+
+%% ---- Residual arcs above each ST-GCN block ----
+\foreach \blk in {b1, b2, b3, b4, b5, b6} {
+  \draw[residual] (\blk.north west) .. controls +(0,0.6) and +(0,0.6) .. (\blk.north east);
+}
+
+\end{tikzpicture}
+}%
+\caption{Baseline 6-block ST-GCN architecture. The six blocks progress through channel widths $(32, 32, 64, 64, 128, 128)$ with temporal downsampling (${\downarrow}2$) at blocks~3 and~5, reducing frame resolution from $T\!=\!100$ to $T\!=\!25$. The classification head applies Global Average Pooling (GAP), Batch Normalisation (BN), Dropout ($p=0.2$), and two fully connected layers (FC\,128\,$\to$\,FC\,15) with a 15-class softmax output. Dashed arcs denote per-block residual connections.}
+\label{fig:baseline-arch}
+\end{figure}
+
+% ─────────────────────────────────────────────────────────────
+\section{Improvement 1: Skeleton Augmentation}
+\label{sec:aug-rationale}
+% ─────────────────────────────────────────────────────────────
+
+With approximately 1,545 training samples distributed across 15 action classes, the per-class sample count is insufficient for a model with thousands of learnable parameters to generalise without explicit regularisation. Data augmentation is the principled first intervention: it increases effective sample diversity without acquiring new labelled data and has been validated as a reliable regularisation strategy for small skeleton datasets~\cite{xin2024enhancing, shorten2019survey}.
+
+Five augmentation transforms are selected from the literature~\cite{xin2024enhancing}: random rotation, random scaling, Gaussian joint jitter, random temporal crop, and speed perturbation. These transforms are applied online at training time only, as PyTorch \texttt{Dataset} transforms, so that each training epoch presents a differently augmented view of every sequence. Augmentation parameters are taken from the literature without further tuning on the validation set, avoiding the risk of over-fitting the validation partition during development.
+
+Speed perturbation is the single most domain-relevant transform for Penn Action's exercise classes. Actions such as squats, jumping jacks, and push-ups exhibit high intra-class cadence variation: a fast execution and a slow execution of the same exercise share the same class label but differ substantially in their frame-count distribution. Speed perturbation resamples each sequence at a uniformly drawn rate, synthesising the range of tempos observed in practice. It is predicted to produce the largest accuracy gain within the augmentation bundle, and its effectiveness constitutes a meaningful domain-specific finding about intra-class variability in exercise recognition~\cite{xin2024enhancing}.
+
+The two spatial augmentations --- random rotation by $\theta \sim \mathcal{U}(-30^\circ,\,30^\circ)$ and Gaussian joint jitter with $\sigma = 0.01$ --- act independently on each frame's coordinate values. Neither transform modifies the adjacency matrix, because joint connectivity in the ST-GCN graph is defined by joint identity rather than by absolute coordinate position. Augmented samples are therefore structurally valid inputs to the same graph convolution layers used for unaugmented sequences, and the graph topology remains intact throughout training.
+
+% ─────────────────────────────────────────────────────────────
+\section{Improvement 2: Adaptive Adjacency Matrices}
+\label{sec:adaptive-rationale}
+% ─────────────────────────────────────────────────────────────
+
+The fixed adjacency matrix of the baseline encodes only the 12 physical bone connections of the Penn Action skeleton. This representation cannot capture correlations between non-adjacent joints that are biomechanically meaningful for exercise recognition: bilateral wrist coupling during push-ups, wrist--ankle coupling during jumping jacks, and hip--shoulder coupling during squats all arise from motor coordination patterns that a fixed anatomical graph cannot express. Replacing the fixed topology with a learnable one is therefore a principled architectural modification for exercise-specific data.
+
+The 2S-AGCN three-component decomposition~\cite{shi2019two} is adopted: the modified adjacency $\hat{\mathbf{A}} = \mathbf{A} + \mathbf{B} + \mathbf{C}$ (Equation~\ref{eq:adaptive-adj}) is substituted into the spatial graph convolution of every ST-GCN block. $\mathbf{A}$ is the fixed, normalised skeleton adjacency matrix, frozen throughout training, which preserves the structural prior. $\mathbf{B}$ is a globally learnable $13 \times 13$ parameter matrix initialised to zero, which learns class-invariant implicit joint dependencies across the training set. $\mathbf{C}$ is computed per forward pass via two $1 \times 1$ convolution branches whose dot product is row-wise softmaxed, capturing instance-level joint co-activation patterns. All other architectural and training parameters remain identical to the baseline, isolating the effect of the adaptive topology in the ablation.
+
+The parameter overhead introduced by this modification is modest: $\mathbf{B}$ adds $13 \times 13 = 169$ parameters per block, totalling 1{,}014 additional parameters across six blocks. The two $1 \times 1$ convolution branches for $\mathbf{C}$ add further capacity per block. Relative to the baseline parameter count, this overhead is small; however, the \emph{effective} increase in model complexity is larger than the raw parameter count suggests, because $\mathbf{C}$'s sample-adaptive component must be estimated from a single training example at inference time.
+
+With approximately 1{,}545 training samples, the sample-adaptive component $\mathbf{C}$ has limited data from which to learn reliable per-sample attention. This is a known limitation of the 2S-AGCN formulation on small datasets: the component that provides the greatest expressiveness is also the component most susceptible to overfitting. Accordingly, Improvement~2 results are framed in advance as a well-motivated negative finding if accuracy gains are modest or absent relative to the baseline --- this reflects the dataset-size constraint rather than a defect in the formulation or its implementation (see Section~4.1 for the full analysis).
+
+% ─────────────────────────────────────────────────────────────
+\section{Improvement 3: Four-Stream Input Fusion}
+\label{sec:fusion-rationale}
+% ─────────────────────────────────────────────────────────────
+
+As seen from the previous chapter, no single input representation captures all aspects of human motion simultaneously. Raw joint coordinates encode absolute pose geometry but are insensitive to relative limb configuration. Bone vectors encode limb orientation and length but discard absolute position. Frame-wise temporal differences of joints and bones encode velocity and acceleration dynamics respectively but discard static pose. Combining these complementary representations is therefore a well-motivated strategy for improving recognition accuracy beyond what any single stream achieves alone.
+
+The MS-AAGCN four-stream fusion strategy~\cite{shi2020skeleton} is adopted: four architecturally identical adaptive ST-GCN models, each equipped with the learnable adjacency $\hat{\mathbf{A}}$ from Improvement~2, are trained independently --- one per input modality: joint coordinates ($\mathbf{v}$), bone vectors ($\mathbf{b}$), joint-motion ($\mathbf{m}^J$), and bone-motion ($\mathbf{m}^B$). All four input tensors share the shape $(N,\,2,\,100,\,13)$. The bone and motion representations are derived from the joint coordinates using the equations introduced in Section~1.2.3 and illustrated in Figure~\ref{fig:four-streams}.
+
+Score-level fusion is preferred over feature-level fusion for two reasons specific to this project. First, it avoids the need to jointly train a large multi-stream model, which would be infeasible given Penn Action's small training set and the Colab Pro compute budget. Second, independent training enables per-stream accuracy analysis (Section~4.1), making the source of any accuracy gain interpretable rather than entangled within a shared feature space. At inference, the four models each produce a softmax probability vector over the 15 classes, and the final prediction is the weighted average:
+%
+\begin{equation}
+    \hat{y} \;=\; w_J\,p^{J} \;+\; w_B\,p^{B} \;+\; w_{JM}\,p^{JM} \;+\; w_{BM}\,p^{BM}
+    \label{eq:fusion}
+\end{equation}
+%
+where the stream weights are set to $w_J : w_B : w_{JM} : w_{BM} = 2:1:2:1$, normalised to sum to 1, following the MS-AAGCN defaults~\cite{shi2020skeleton}. These fixed weights are taken from the literature without re-optimisation for Penn Action, for two reasons: re-optimising on the validation set risks overfitting to the small validation partition, and using literature defaults provides a reproducible, unbiased reference point. Learned fusion weights are identified as a limitation and a priority for future work (Section~4.7). Each stream model is trained from scratch with the same hyperparameters as the baseline; no parameters are shared between streams, maximising the diversity of the learned representations.
+
+% ─────────────────────────────────────────────────────────────
+\section{Ablation Study Design}
+\label{sec:ablation-design}
+% ─────────────────────────────────────────────────────────────
+
+The experiment is structured as a sequential ablation study in which each configuration introduces exactly one modification relative to the previous, so that the marginal contribution of each improvement can be attributed cleanly. This design rules out confounding by simultaneous changes and makes the ablation table directly interpretable: each row answers a single, well-posed question about one architectural or data-pipeline decision.
+
+Four configurations are evaluated, as summarised in Table~\ref{tab:ablation-configs}. Configuration~(1) is the unmodified baseline. Configuration~(2) adds skeleton data augmentation to the baseline pipeline. Configuration~(3) replaces the fixed adjacency with the learnable $\hat{\mathbf{A}}$ decomposition, without augmentation, to isolate the topology change. Configuration~(4) adds four-stream fusion on top of Configuration~(3), combining the adaptive adjacency with the multi-stream input strategy.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{c l c c c}
+    \hline
+    \textbf{Config} & \textbf{Description} & \textbf{Augmentation} & \textbf{Adaptive $\hat{\mathbf{A}}$} & \textbf{Streams} \\
+    \hline
+    (1) & ST-GCN baseline              & No  & No  & 1 (joint) \\
+    (2) & (1) + skeleton augmentation  & Yes & No  & 1 (joint) \\
+    (3) & (1) + adaptive adjacency     & No  & Yes & 1 (joint) \\
+    (4) & (3) + four-stream fusion     & No  & Yes & 4          \\
+    \hline
+\end{tabular}
+\caption{The four experimental configurations for the ablation study. Each row introduces exactly one modification. Comparing (2) vs (1) isolates augmentation; comparing (3) vs (1) isolates the adaptive topology; comparing (4) vs (3) measures the additional benefit of four-stream fusion.}
+\label{tab:ablation-configs}
+\end{table}
+
+All configurations share the same hyperparameters (Section~3.6) and the same training schedule of 60 epochs. The testing methodology that governs how configurations are evaluated is described in Section~\ref{sec:testing-strategy}. The results of this ablation study are presented and analysed in Chapter~4.
+
+% ─────────────────────────────────────────────────────────────
+\section{Testing Strategy}
+\label{sec:testing-strategy}
+% ─────────────────────────────────────────────────────────────
+
+The test set is held out entirely and evaluated exactly once per configuration, after training is fully finalised. This single-evaluation discipline ensures that no design decision in the ablation study is informed by test-set performance, preventing inadvertent contamination --- a standard requirement for unbiased reporting in supervised learning~\cite{yan2018spatial}. Validation accuracy is used during training to monitor convergence and during the WandB hyperparameter sweep (Section~3.7) to select training configuration; it is never consulted when comparing experimental conditions against one another.
+
+The official Penn Action training partition is divided 80/20, stratified by class, into training and validation subsets, yielding approximately 1,545 training samples and 387 validation samples. The held-out test set contains approximately 394 samples. The stratified split ensures that each class is proportionally represented in both subsets, which is particularly important given the class imbalance between exercise and non-exercise categories in Penn Action~\cite{zhang2013actemes}.
+
+Top-1 classification accuracy on the test set is the primary evaluation metric, consistent with prior work on Penn Action and skeleton-based action recognition benchmarks~\cite{yan2018spatial, shi2019two}. In addition, per-class accuracy is reported separately for the 8 exercise classes and the 7 non-exercise (sport) classes. This disaggregation directly addresses the central research question: whether the three improvements disproportionately benefit exercise recognition or improve accuracy uniformly across all categories (see Section~4.2 for the analysis).
+
+To assess result stability, each configuration is trained with 3 independent random seeds; mean~$\pm$ standard deviation test accuracy is reported across the three runs. All random number generators --- NumPy, PyTorch, and Python's \texttt{random} module --- are seeded identically for each run. Augmentation transforms are applied exclusively during training; all evaluation uses original, unmodified sequences to ensure that reported test accuracy reflects the model's generalisation ability rather than any test-time augmentation effect.
+
+% ─────────────────────────────────────────────────────────────
+\section{Project Management}
+\label{sec:project-mgmt}
+% ─────────────────────────────────────────────────────────────
+
+\subsection{Agile Sprint Structure}
+\label{sec:sprints}
+
+The project was managed using a four-sprint Agile methodology, with each two-week sprint aligned to one experimental configuration of the ablation study. This structure ensured that every deliverable --- the baseline, the augmentation variant, the adaptive adjacency variant, and the four-stream fusion model --- was independently completable and testable before the next sprint began, keeping scope controlled and the ablation boundaries clean across the project timeline.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{l l l l}
+    \hline
+    \textbf{Sprint} & \textbf{Duration} & \textbf{Goal} & \textbf{Key Deliverable} \\
+    \hline
+    Sprint~1 & Weeks 1--2 & Dataset pipeline and baseline model    & C~(1): baseline test accuracy \\
+    Sprint~2 & Weeks 3--4 & Skeleton data augmentation             & C~(2): augmentation result \\
+    Sprint~3 & Weeks 5--6 & Adaptive adjacency matrices            & C~(3): adaptive adjacency result \\
+    Sprint~4 & Weeks 7--8 & Four-stream fusion and final evaluation & C~(4): full model; ablation table \\
+    \hline
+\end{tabular}
+\caption{Sprint plan summary. Each sprint delivers one validated experimental configuration, maintaining clean ablation boundaries.}
+\label{tab:sprints}
+\end{table}
+
+\subsection{Risk Management}
+\label{sec:risk}
+
+Three principal risks were identified at the outset of the project, each with a pre-defined mitigation strategy. \textbf{Compute risk:} Google Colab Pro session limits were mitigated by structuring every training run as a self-contained script with checkpoint saving, enabling seamless resumption without repeating completed epochs. \textbf{Negative result risk:} Improvement~2 was identified early as high-risk on a small dataset; the sprint plan explicitly reserved the option to reframe a non-improvement as a documented finding rather than investing additional compute in post-hoc fixes. \textbf{Deadline risk:} the most compute-intensive sprint (Sprint~4, four-stream fusion) was scoped last, ensuring that a publishable stopping point --- with a complete baseline and at least two ablation conditions --- existed if time ran short.
+
+% ─────────────────────────────────────────────────────────────
+\section{Version Control}
+\label{sec:version-control}
+% ─────────────────────────────────────────────────────────────
+
+\subsection{Google Colab and GitHub Workflow}
+\label{sec:workflow}
+
+Development was conducted primarily in Google Colab Pro notebooks. Version control followed a two-phase approach that reflects the exploratory nature of deep learning experimentation:
+During active experimentation, Colab's built-in revision history and Google Drive autosave preserved notebook state, allowing individual cells to be iterated freely without formal commits and enabling rapid prototyping of preprocessing steps, model variants, and training loops.
+
+At the end of each sprint, notebooks were canonicalised: non-essential exploratory cells were removed, all outputs were cleared, and the execution order was reorganised into a linear, reproducible sequence. The canonicalised notebook was then committed to the project's GitHub repository, producing a clean, reviewable snapshot of the codebase at each ablation stage. The repository is organised into five directories: \texttt{data/} (preprocessing scripts), \texttt{models/} (baseline and adaptive ST-GCN definitions), \texttt{training/} (training loop and sweep configuration), \texttt{evaluation/} (test evaluation and confusion matrix scripts), and \texttt{notebooks/} (canonicalised sprint notebooks). The repository URL is provided in Appendix~C.4.
+
+\subsection{Branching Strategy}
+\label{sec:branching}
+
+The \texttt{main} branch holds canonicalised, sprint-end snapshots only; no unvalidated code is merged to \texttt{main}. A dedicated feature branch was created at the start of each sprint --- \texttt{feature/augmentation}, \texttt{feature/adaptive-adj}, and \texttt{feature/four-stream} --- and merged to \texttt{main} via pull request only after the sprint's acceptance criteria were met.
