@@ -1,13 +1,90 @@
 \chapter{Implementation and Validation}
 \label{chapter3}
 
-<Implementation, validation should be described in one or more chapters. See the `Implementation and Validation' criterion in the mark scheme for the sorts of material that may be included here.>
+This chapter records how each design decision described in Chapter~2 was realised in code. It specifies the technology stack, the dataset preparation pipeline, the concrete construction of the baseline ST-GCN and the three incremental improvements, the training configuration shared across all ablation conditions, the hyperparameter search used to select that configuration, and the principal engineering challenges encountered during development. Ablation results obtained using this implementation are presented in Chapter~\ref{chapter4}. The chapter begins with the technology stack before detailing dataset preparation, the baseline architecture, each incremental modification, and the training and optimisation procedures.
 
-\section{A section}
-\lipsum[8]
+\section{Technology Stack}
+\label{sec:techstack}
 
-\subsection{A sub-section}
-\lipsum[11]
+All training and evaluation were conducted on Google Colab Pro using an NVIDIA A100 GPU (40~GB). Colab Pro was chosen to provide reliable access to a GPU accelerator without requiring local hardware, and the A100 allocation was sufficient to train every ablation condition end-to-end within a single session.
 
-\section{Another section}
-\lipsum[12]
+The implementation uses PyTorch~[11] for all model construction, forward passes, and gradient updates. NumPy and SciPy handle \texttt{.mat} file parsing and numerical preprocessing, and scikit-learn provides the stratified train/validation split. Weights and Biases~[10] is used for experiment tracking and the Bayesian hyperparameter sweep described in Section~\ref{sec:hpo}. Seaborn and Matplotlib produce the confusion matrix visualised in Section~4.3. With the compute environment defined, the following section describes how the Penn Action dataset is prepared for model input.
+
+\section{Dataset Preparation}
+\label{sec:dataprep}
+
+The Penn Action dataset is distributed as \texttt{.mat} files, each containing a variable-length sequence of 2D joint coordinate arrays and an integer action label~[4]. Parsing extracts joint arrays of shape $(T_{\text{raw}},\,13,\,2)$ and maps integer labels to the 15 Penn Action class names. One label correction is applied: the raw label \texttt{'strumming\_guitar'} is normalised to \texttt{'strum\_guitar'} for consistency with the official class list. The full class index-to-name mapping is provided in Appendix~C.1, as it is required for confusion matrix interpretation in Section~4.3.
+
+All sequences are normalised to a fixed length of $T = 100$ frames. Clips longer than 100 frames are center-cropped, retaining the central 100 frames and discarding leading and trailing frames symmetrically. Clips shorter than 100 frames are extended by repeating the final frame until 100 frames are reached. This produces a uniform shape of $(100,\,13,\,2)$ per sample. After normalisation, the combined training partition has shape $(1258,\,100,\,13,\,2)$.
+
+Two spatial normalisation steps are applied per sequence. First, the mid-hip centroid --- the mean of left hip (joint~7) and right hip (joint~8) coordinates at each frame --- is subtracted from all joints, removing absolute translation. Second, each centred sequence is divided by the torso length, defined as the Euclidean distance between the hip centroid and the mean of left shoulder (joint~1) and right shoulder (joint~2) coordinates, with a floor of $\varepsilon = 10^{-6}$ to prevent division by zero. This scale normalisation reduces inter-subject variation in body size.
+
+The official Penn Action test partition is held out entirely and is never accessed during training or hyperparameter selection (see Section~2.7). The official training partition is divided 80/20, stratified by class, into training and validation subsets. The total training partition contains 1{,}258 sequences; the 80/20 stratified split yields 1{,}002 training samples and 252 validation samples, and the official test partition contains 394 samples. Training and validation subsets are instantiated as separate dataset objects, and the validation object never receives augmentation. The full preparation pipeline is shown in Figure~\ref{fig:datapipeline}. With the data pipeline established, the following section describes the concrete implementation of the baseline ST-GCN.
+
+\section{ST-GCN Baseline}
+\label{sec:baseline}
+
+The baseline network accepts input tensors of shape $(N,\,C,\,T,\,V,\,M) = (N,\,2,\,100,\,13,\,1)$, where $N$ is the batch size, $C = 2$ corresponds to $(x,\,y)$ coordinates, $T = 100$ is the normalised temporal dimension, $V = 13$ is the joint count, and $M = 1$ is the number of persons. The person dimension is merged into the batch dimension at the start of the first block, giving a working tensor of shape $(N,\,2,\,100,\,13)$ throughout the network.
+
+The spatial graph is an undirected graph over the 13 Penn Action joints, with self-loops added to each node. The adjacency matrix $\mathbf{A}$ is symmetrically normalised as $\mathbf{D}^{-1/2}\mathbf{A}\mathbf{D}^{-1/2}$ and registered as a non-learnable buffer, frozen throughout all training conditions. A single unified adjacency matrix is used; there is no three-partition decomposition in the baseline implementation~[1].
+
+Six ST-GCN blocks are stacked with output channel widths $[32,\,32,\,64,\,64,\,128,\,128]$. Each block applies three stages: (i) spatial graph convolution via \texttt{einsum('nctv,vw->nctw')} followed by a $1{\times}1$ convolution, batch normalisation, and ReLU; (ii) temporal convolution with kernel size~9 and padding~4; and (iii) batch normalisation, dropout, and a residual connection (identity or $1{\times}1$ projection). Temporal stride-2 downsampling at blocks~3 and~5 reduces the temporal resolution from 100 to 50 to 25 frames. The first block uses no residual connection.
+
+After the final ST-GCN block, global average pooling collapses the $(128,\,25,\,13)$ tensor by taking the mean over the temporal and joint dimensions, producing a 128-dimensional feature vector. A 1D batch normalisation layer and $\text{Dropout}(p = 0.2)$ are applied, followed directly by a fully connected layer $\text{FC}(15)$ with softmax output; there is no intermediate $\text{FC}(128)$ layer. The total baseline parameter count is $434{,}575$. The three incremental improvements applied to this baseline are described in the following section.
+
+\section{Full ST-GCN Implementation}
+\label{sec:fullstgcn}
+
+\subsection{Augmentation Pipeline}
+\label{subsec:augmentation}
+
+Four augmentation transforms are applied per sample during training only, inside the \texttt{\_\_getitem\_\_} method of \texttt{PennActionDatasetAug}. Each transform is applied independently with probability $p = 0.5$, and the validation dataset object does not receive any augmentation. Line~922 of \texttt{penn\_stgcn\_final.py} contains a default of \texttt{training=False} for the dataset instantiation parameter; however, this flag was always set to \texttt{training=True} before every ablation run, so augmentation was active in all Condition~2 and Condition~4 runs, and the reported results reflect the intended pipeline.
+
+The four transforms are as follows. (1)~\emph{Rotation}: all 13 joint coordinates are rotated by $\theta \sim \mathcal{U}(5^\circ,\,20^\circ)$ about the hip centroid, applied uniformly across all frames. (2)~\emph{Gaussian noise}: additive noise $\varepsilon \sim \mathcal{N}(0,\,0.01^2)$ is applied independently per joint coordinate per frame. (3)~\emph{Time interpolation}: the sequence is densified to 200 frames by linear interpolation following Xin et al.~[9, Eq.~14], then $T = 100$ frames are stride-sampled uniformly from the 200-frame sequence, producing a slow-motion effect. (4)~\emph{Time warping}: the sequence is divided into 5 equal segments; each segment boundary is shifted by $t \sim \mathcal{N}(0,\,1.5^2)$, clipped to $\pm\tfrac{\text{segment\_len}}{2}$, and the result is resampled to 100 frames.
+
+\subsection{Adaptive Adjacency}
+\label{subsec:adaptive}
+
+Each of the six ST-GCN blocks replaces the fixed buffer $\mathbf{A}$ with the decomposition $\hat{\mathbf{A}} = \mathbf{A} + \mathbf{B} + \mathbf{C}$~[2]. Here $\mathbf{A}$ remains the frozen normalised skeleton adjacency. $\mathbf{B}$ is an \texttt{nn.Parameter} of shape $(13,\,13)$, initialised to zero, shared across all samples, and updated by gradient descent. $\mathbf{C}$ is computed per forward pass: two $1{\times}1$ convolution branches $\theta$ and $\phi$ compress features to $C/4$ channels; their temporal mean is taken, producing $(N,\,C/4,\,V)$ each; the dot product across the channel dimension yields $(N,\,V,\,V)$, which is row-wise softmaxed.
+
+The static components $\mathbf{A}$ and $\mathbf{B}$ use the einsum signature \texttt{nctv,vw->nctw}, broadcasting over the batch dimension $n$. The sample-adaptive component $\mathbf{C}$ uses \texttt{nctv,nvw->nctw}, where the batch dimension appears in both operands and correctly propagates the per-sample adjacency.
+
+\subsection{Four-Stream Derivation and Fusion}
+\label{subsec:fourstream}
+
+Four input streams are derived from the preprocessed joint array of shape $(100,\,13,\,2)$. Stream~1 --- \emph{joint}: raw $(x,\,y)$ coordinates of shape $(2,\,100,\,13)$. Stream~2 --- \emph{bone}: directed difference $\mathbf{b}_{ij} = \mathbf{v}_j - \mathbf{v}_i$ for each of the 12 skeleton edges, shape $(2,\,100,\,13)$. Stream~3 --- \emph{joint-motion}: frame-wise difference $\Delta\mathbf{v}_t = \mathbf{v}_{t+1} - \mathbf{v}_t$, zero-padded at $t = 0$, shape $(2,\,100,\,13)$. Stream~4 --- \emph{bone-motion}: frame-wise difference of bone vectors $\Delta\mathbf{b}_t$, zero-padded at $t = 0$, shape $(2,\,100,\,13)$. The full derivation pipeline is shown in Figure~\ref{fig:pipeline}.
+
+Four architecturally identical adaptive ST-GCN models --- one per stream --- are trained independently with the shared hyperparameters in Section~\ref{sec:training} and the same three random seeds (42, 43, 44). At inference, their softmax output vectors are combined via the weighted average
+\begin{equation}
+\hat{y} = \frac{2\,p^{J} + p^{B} + 2\,p^{JM} + p^{BM}}{6},
+\end{equation}
+with weights $2{:}1{:}2{:}1$ taken from MS-AAGCN~[3]. The class with the highest fused score is the final prediction. The training configuration shared across all ablation conditions is described in the following section.
+
+\section{Training Protocol}
+\label{sec:training}
+
+All four ablation conditions share a common training configuration. The Adam optimiser~[12] is used with an initial learning rate of $10^{-3}$ and weight decay $10^{-5}$. A cosine annealing schedule (\texttt{CosineAnnealingLR}, $T_{\text{max}} = 200$, $\eta_{\min} = 10^{-6}$) reduces the learning rate over the full training run, and the loss function is cross-entropy. Appendix~C.2 of the skeleton incorrectly lists SGD; Adam is the actual optimiser used, as confirmed by the \texttt{BEST\_CONFIG} dictionary in the implementation code.
+
+Training runs for up to 200 epochs with early stopping (\texttt{EarlyStopping}, patience $= 15$, \texttt{min\_delta} $= 0.001$) monitoring validation loss. The batch size is 64. Each ablation condition is trained with three independent random seeds (42, 43, 44); the \texttt{seed\_everything()} function seeds PyTorch, CUDA, NumPy, Python's \texttt{random} module, and DataLoader workers via \texttt{worker\_init\_fn}, ensuring full reproducibility. The epoch budget was not set arbitrarily: a series of trials was undertaken to identify where the model stagnates in terms of training loss, establishing the most suitable epoch ceiling, and early stopping was then adopted to formalise that ceiling without wasting compute on runs that converge earlier. Prior to the ablation study, a hyperparameter search was conducted on the baseline model to establish this training configuration.
+
+\section{Hyperparameter Optimisation}
+\label{sec:hpo}
+
+A 20-run Bayesian hyperparameter sweep was conducted on the baseline model (Condition~1) using Weights and Biases~[10] prior to adding any improvements. The metric optimised is best validation accuracy. The search space is: learning rate $\in [10^{-4},\,10^{-2}]$ log-uniform; weight decay $\in [10^{-5},\,10^{-3}]$ log-uniform; batch size $\in \{32,\,64\}$; dropout $\in \{0.2,\,0.3\}$. Early termination uses the HyperBand scheduler (\texttt{min\_iter} $= 10$, $\eta = 3$) with all runs capped at 20 epochs. The full sweep configuration is provided in Appendix~C.3.
+
+Runs with learning rate near $10^{-3}$ dominated the top-performing configurations. Dropout and batch size showed low discriminative power across their respective ranges, and weight decay preference was concentrated near the lower bound of the search range. The final configuration adopted for all ablation conditions is therefore: learning rate $= 10^{-3}$, batch size $= 64$, dropout $= 0.2$, weight decay $= 10^{-5}$. The parallel coordinates visualisation of all 20 runs is shown in Figure~\ref{fig:sweep}. The following section documents the engineering challenges encountered during implementation and the solutions adopted.
+
+\section{Engineering Challenges}
+\label{sec:challenges}
+
+\paragraph{Challenge 1 --- Time interpolation producing no visible effect.}
+The initial implementation of \texttt{augment\_time\_interpolation} upsampled the sequence by $\gamma = 2$ via linear interpolation to 200 frames, then uniformly resampled back to $T = 100$ frames. The output was algebraically identical to the input: resampling at a uniform stride over a linearly interpolated sequence recovers the original samples exactly, making the transformation a no-op. Diagnosis was confirmed by direct inspection of the output arrays. The fix, following Xin et al.~[9, Eq.~14], first constructs a full 200-frame densified sequence by inserting interpolated frames between every pair of original frames; $T = 100$ frames are then selected via \texttt{np.linspace} indices spanning the entire densified sequence, achieving the intended slow-motion effect.
+
+\paragraph{Challenge 2 --- Non-deterministic training results across seeds.}
+Nominally identical configurations produced different validation accuracies across runs despite fixed seed values. Four sources of non-determinism were identified and corrected: (i)~CUDA operations not seeded via \texttt{torch.cuda.manual\_seed\_all()}; (ii)~cuDNN non-deterministic algorithms not disabled (\texttt{cudnn.deterministic=True}, \texttt{cudnn.benchmark=False}); (iii)~DataLoader worker processes not seeded, fixed via \texttt{worker\_init\_fn} seeding each worker from \texttt{torch.initial\_seed() \% 2**32}; and (iv)~DataLoader shuffle not seeded with a generator. All four fixes are encapsulated in \texttt{seed\_everything()}, which is called at the start of every training run.
+
+\paragraph{Challenge 3 --- Data shape and transposition.}
+Raw samples loaded from \texttt{.mat} files have shape $(T,\,V,\,C) = (100,\,13,\,2)$, while the ST-GCN forward pass expects shape $(N,\,C,\,T,\,V,\,M)$. The mismatch caused silent shape errors in the first einsum layer. Inside \texttt{Dataset.\_\_getitem\_\_}, \texttt{np.transpose(x, (2, 0, 1))} reorders the axes to $(C,\,T,\,V) = (2,\,100,\,13)$, and \texttt{np.expand\_dims(x, axis=-1)} appends the person dimension to give $(2,\,100,\,13,\,1)$. The \texttt{forward()} method then merges the $N$ and $M$ dimensions via \texttt{.view(N*M, C, T, V)} before block~1.
+
+\paragraph{Challenge 4 --- Epoch budget selection.}
+The initial training budget of 60 epochs under-converged: both training and validation loss continued declining at epoch~60. Extending to 200 epochs achieved convergence but wasted compute when models converged earlier. The final solution adds early stopping (\texttt{EarlyStopping}, patience $= 15$, \texttt{min\_delta} $= 0.001$) monitoring validation loss rather than validation accuracy, since loss continues improving through calibration after accuracy has plateaued. This combination --- a 200-epoch ceiling with early stopping --- is adopted for all four ablation conditions. The ablation results obtained using this implementation are presented and discussed in Chapter~\ref{chapter4}.

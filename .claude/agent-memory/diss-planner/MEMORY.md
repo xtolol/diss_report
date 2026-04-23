@@ -1,0 +1,3 @@
+- [Chris — BSc CS Dissertation Student](user_profile.md) — BSc Leeds student writing ST-GCN dissertation; PyTorch/W&B experience; uses Colab Pro
+- [Dissertation Key Experimental Facts](project_key_facts.md) — Confirmed hyperparameters, optimiser (Adam not SGD), augmentations, splits, bugs fixed; overrides skeleton where they conflict
+- [Writing Brief Format Requirements](feedback_brief_format.md) — Must match chapter2_writing_brief.md format exactly: metadata, framing note, per-section specs, TBD flags, cross-refs, transitions, open questions
